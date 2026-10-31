@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling", "hatch-pyo3"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tbx_pyo3"
+version = "0.1.0"
+description = "A high-performance localization data-engine with extended provenance metadata parsing."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Localization Engineer", email = "developer@lokit.org" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing :: Markup :: XML"
+]
+dependencies = []
+
+# Configure Hatchling build targets
+[tool.hatch.build.targets.wheel]
+packages = ["src/tbx_pyo3"] # Fallback Python initialization wraps here
+
+# Configure the PyO3 binary compilation matrix hooks
+[[tool.hatch.build.targets.wheel.hooks.pyo3.modules]]
+name = "tbx_pyo3.tbx_pyo3" # Targets internal binary namespace layout
+binding = "pyo3"
+project-root = "."
+# Optional optimization profile overrides
+cargo-args = ["--release"]
