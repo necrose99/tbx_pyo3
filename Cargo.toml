@@ -1,0 +1,15 @@
+[package]
+name = "tbx_pyo3"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tbx_pyo3"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+quick-xml = { version = "0.36", features = ["serialize"] }
+regex = "1.10"
+oxttl = "0.1"
+oxrdfxml = "0.1"
