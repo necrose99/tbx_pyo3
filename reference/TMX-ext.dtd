@@ -1,0 +1,38 @@
+<!-- Extended Provenance DTD definition for TMX 1.4b -->
+<!ELEMENT tmx (header, body)>
+<!ATTLIST tmx version CDATA #FIXED "1.4">
+
+<!ELEMENT header EMPTY> <!-- Standard headers go here -->
+<!ELEMENT body (tu+)>
+
+<!ELEMENT tu (prop*, note*, tuv+)>
+<!ATTLIST tu 
+    tuid CDATA #REQUIRED
+    x-scientific_name CDATA #IMPLIED>
+
+<!-- 
+  THE METADATA ENUMERATION EXTENSION: 
+  This legally enforces your exact QA fields inside standard <prop> elements
+-->
+<!ELEMENT prop (#PCDATA)>
+<!ATTLIST prop type (
+    provenance | 
+    isbn | 
+    doi | 
+    library_of_congress | 
+    dewey | 
+    pdf_anchor | 
+    mp3_url | 
+    x-scientific_name |
+    x-form-type |
+    x-letter |
+    x-ipa-mia | 
+    x-ipa-en | 
+    text_ja | 
+    text_mia
+) #REQUIRED>
+
+<!ELEMENT note (#PCDATA)>
+<!ELEMENT tuv (seg)>
+<!ATTLIST tuv xml:lang CDATA #REQUIRED>
+<!ELEMENT seg (#PCDATA)>
