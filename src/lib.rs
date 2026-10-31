@@ -1,16 +1,17 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use pyo3::types::PyDict;
-use quick_xml::events::{Event, BytesStart, BytesEnd, BytesText};
+use quick_xml::events::{Event, BytesStart, BytesEnd, BytesText, BytesDecl};
 use quick_xml::Writer;
 use regex::Regex;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufWriter, Write};
+use std::fs::File;
 
-/// A fully normalized cross-format Translation Unit.
+/// A fully normalized, high-fidelity provenance translation data model.
 #[pyclass]
 #[derive(Clone, Debug)]
-pub struct ExtendedTranslationUnit {
+pub struct ComprehensiveTranslationUnit {
     #[pyo3(get, set)]
     pub id: String,
     #[pyo3(get, set)]
@@ -21,177 +22,210 @@ pub struct ExtendedTranslationUnit {
     pub source_lang: String,
     #[pyo3(get, set)]
     pub target_lang: String,
+    /// Holds open provenance identifiers (isbn, doi, url, loc, dewey, pdf, x-scientific_name, mp3_url)
     #[pyo3(get, set)]
     pub metadata: HashMap<String, String>,
+    #[pyo3(get, set)]
+    pub notes: Vec<String>,
 }
 
 #[pymethods]
-impl ExtendedTranslationUnit {
+impl ComprehensiveTranslationUnit {
     #[new]
     fn new(id: String, source_text: String, target_text: String, source_lang: String, target_lang: String) -> Self {
-        ExtendedTranslationUnit {
+        ComprehensiveTranslationUnit {
             id,
             source_text,
             target_text,
             source_lang,
             target_lang,
             metadata: HashMap::new(),
+            notes: Vec::new(),
         }
     }
 
     fn add_meta(&mut self, key: String, value: String) {
         self.metadata.insert(key, value);
     }
-}
 
-/// Helper function that scans a string block for Latin Binomial configurations ($Genus $species)
-fn detect_scientific_name(text: &str, regex: &Regex) -> Option<String> {
-    if let Some(mat) = regex.find(text) {
-        Some(mat.as_str().to_string())
-    } else {
-        None
+    fn add_note(&mut self, note: String) {
+        self.notes.push(note);
     }
 }
 
-/// Dynamic XML Streaming Pull-Parser with automated Taxonomy & Property Mapping
-#[pyfunction]
-fn parse_and_enrich_stream(py: Python, file_path: String, url_prefix: String, audio_prefix: String) -> PyResult<Vec<PyObject>> {
-    py.allow_threads(|| {
-        let mut reader = quick_xml::reader::Reader::from_file(&file_path)
-            .map_err(|e| PyValueError::new_err(format!("XML file open error: {}", e)))?;
-        reader.config_mut().trim_text(true);
+// ============================================================================
+// SYSTEM STREAMING WRITERS (EXPORT PIPELINE GENERATION MATRIX)
+// ============================================================================
 
-        // Pre-compile the high-performance regex filters
-        let binomial_rx = Regex::new(r"\b[A-Z][a-z]+(?:\s+[a-z]+){1,2}\b").unwrap();
-        let ipa_rx = Regex::new(r"^x-ipa-(?P<lang>[a-zA-Z\-]+)$").unwrap();
+fn write_meta_props<W: Write>(writer: &mut Writer<W>, metadata: &HashMap<String, String>) -> Result<(), quick_xml::Error> {
+    for (key, val) in metadata {
+        let mut prop = BytesStart::new("prop");
+        prop.push_attribute(("type", key.as_str()));
+        writer.write_event(Event::Start(prop))?;
+        writer.write_event(Event::Text(BytesText::new(val)))?;
+        writer.write_event(Event::End(BytesEnd::new("prop")))?;
+    }
+    Ok(())
+}
 
-        let mut buf = Vec::new();
-        let mut extracted_units = Vec::new();
+fn write_notes<W: Write>(writer: &mut Writer<W>, notes: &[String]) -> Result<(), quick_xml::Error> {
+    for note_text in notes {
+        writer.write_event(Event::Start(BytesStart::new("note")))?;
+        writer.write_event(Event::Text(BytesText::new(note_text)))?;
+        writer.write_event(Event::End(BytesEnd::new("note")))?;
+    }
+    Ok(())
+}
 
-        // SAX Parser tracking frames
-        let mut current_id = String::new();
-        let mut current_props: HashMap<String, String> = HashMap::new();
-        let mut current_segments: Vec<(String, String)> = Vec::new(); // (Lang, Content)
+/// Generates valid, schema-compliant TMX documents using <prop> extensions.
+pub fn stream_to_tmx<W: Write>(writer: &mut Writer<W>, unit: &ComprehensiveTranslationUnit) -> Result<(), quick_xml::Error> {
+    let mut tu = BytesStart::new("tu");
+    tu.push_attribute(("tuid", unit.id.as_str()));
+    if let Some(sci) = unit.metadata.get("x-scientific_name") {
+        tu.push_attribute(("x-scientific_name", sci.as_str()));
+    }
+    writer.write_event(Event::Start(tu))?;
 
-        let mut inside_prop = false;
-        let mut inside_seg = false;
-        let mut inside_note = false;
-        let mut current_prop_type = String::new();
-        let mut current_lang_context = String::new();
-        let mut notes_collection = Vec::new();
+    write_meta_props(writer, &unit.metadata)?;
+    write_notes(writer, &unit.notes)?;
 
-        while let Ok(event) = reader.read_event_into(&mut buf) {
-            match event {
-                // Hook top-level unit entity headers across TMX / TBX / XLIFF variants
-                Event::Start(ref e) if e.name().as_ref() == b"tu" || e.name().as_ref() == b"termEntry" || e.name().as_ref() == b"trans-unit" || e.name().as_ref() == b"unit" => {
-                    current_id = e.attributes().flatten()
-                        .find(|a| a.key.as_ref() == b"id" || a.key.as_ref() == b"tuid")
-                        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
-                        .unwrap_or_else(|| "unit-gen".to_string());
-                    
-                    current_props.clear();
-                    current_segments.clear();
-                    notes_collection.clear();
+    let mut tuv_src = BytesStart::new("tuv");
+    tuv_src.push_attribute(("xml:lang", unit.source_lang.as_str()));
+    writer.write_event(Event::Start(tuv_src))?;
+    writer.write_event(Event::Start(BytesStart::new("seg")))?;
+    writer.write_event(Event::Text(BytesText::new(&unit.source_text)))?;
+    writer.write_event(Event::End(BytesEnd::new("seg")))?;
+    writer.write_event(Event::End(BytesEnd::new("tuv")))?;
 
-                    // Instantly capture inline custom attributes (e.g., <prop x-scientific_name="Panthera leo">)
-                    if let Some(Ok(sci_attr)) = e.attributes().find(|a| a.as_ref().unwrap().key.as_ref() == b"x-scientific_name") {
-                        let val = String::from_utf8_lossy(&sci_attr.value).into_owned();
-                        if !val.is_empty() {
-                            current_props.insert("scientific_name".to_string(), val);
-                        }
-                    }
-                }
+    let mut tuv_trg = BytesStart::new("tuv");
+    tuv_trg.push_attribute(("xml:lang", unit.target_lang.as_str()));
+    writer.write_event(Event::Start(tuv_trg))?;
+    writer.write_event(Event::Start(BytesStart::new("seg")))?;
+    writer.write_event(Event::Text(BytesText::new(&unit.target_text)))?;
+    writer.write_event(Event::End(BytesEnd::new("seg")))?;
+    writer.write_event(Event::End(BytesEnd::new("tuv")))?;
 
-                // Ingest traditional metadata property strings
-                Event::Start(ref e) if e.name().as_ref() == b"prop" || e.name().as_ref() == b"descrip" || e.name().as_ref() == b"termNote" => {
-                    if let Some(Ok(attr)) = e.attributes().find(|a| a.as_ref().unwrap().key.as_ref() == b"type") {
-                        current_prop_type = String::from_utf8_lossy(&attr.value).into_owned();
-                        inside_prop = true;
-                    }
-                }
+    writer.write_event(Event::End(BytesEnd::new("tu")))?;
+    Ok(())
+}
 
-                // Handle localization note wrappers (<note> or <notes>)
-                Event::Start(ref e) if e.name().as_ref() == b"note" || e.name().as_ref() == b"notes" => {
-                    inside_note = true;
-                }
+/// Generates a valid ISO 30042 TBX Terminology Document using strict schema elements.
+pub fn stream_to_tbx<W: Write>(writer: &mut Writer<W>, unit: &ComprehensiveTranslationUnit) -> Result<(), quick_xml::Error> {
+    let mut entry = BytesStart::new("conceptEntry");
+    entry.push_attribute(("id", unit.id.as_str()));
+    writer.write_event(Event::Start(entry))?;
 
-                // Catch language variation context parameters
-                Event::Start(ref e) if e.name().as_ref() == b"tuv" || e.name().as_ref() == b"langSec" || e.name().as_ref() == b"langSet" => {
-                    current_lang_context = e.attributes().flatten()
-                        .find(|a| a.key.as_ref() == b"xml:lang" || a.key.as_ref() == b"lang")
-                        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
-                        .unwrap_or_default();
-                }
+    // Global descriptions/provenance metadata at concept level
+    for (key, val) in &unit.metadata {
+        if key == "provenance" || key == "isbn" || key == "doi" || key == "library_of_congress" || key == "dewey" {
+            let mut descrip = BytesStart::new("descrip");
+            descrip.push_attribute(("type", key.as_str()));
+            writer.write_event(Event::Start(descrip))?;
+            writer.write_event(Event::Text(BytesText::new(val)))?;
+            writer.write_event(Event::End(BytesEnd::new("descrip")))?;
+        }
+    }
 
-                Event::Start(ref e) if e.name().as_ref() == b"seg" || e.name().as_ref() == b"term" || e.name().as_ref() == b"source" || e.name().as_ref() == b"target" => {
-                    inside_seg = true;
-                }
+    // Source Language Section
+    let mut lang_src = BytesStart::new("langSec");
+    lang_src.push_attribute(("xml:lang", unit.source_lang.as_str()));
+    writer.write_event(Event::Start(lang_src))?;
+    writer.write_event(Event::Start(BytesStart::new("termSec")))?;
+    writer.write_event(Event::Start(BytesStart::new("term")))?;
+    writer.write_event(Event::Text(BytesText::new(&unit.source_text)))?;
+    writer.write_event(Event::End(BytesEnd::new("term")))?;
+    writer.write_event(Event::End(BytesEnd::new("termSec")))?;
+    writer.write_event(Event::End(BytesEnd::new("langSec")))?;
 
-                // Capture underlying character data fragments securely
-                Event::Text(ref e) => {
-                    let clean_text = e.unescape().unwrap_or_default().into_owned();
-                    
-                    if inside_prop && !current_prop_type.is_empty() {
-                        current_props.insert(current_prop_type.clone(), clean_text);
-                    } else if inside_note {
-                        notes_collection.push(clean_text);
-                    } else if inside_seg {
-                        // Extract language definition if missing (fallback schema layers)
-                        let resolved_lang = if current_lang_context.is_empty() { "und".to_string() } else { current_lang_context.clone() };
-                        current_segments.push((resolved_lang, clean_text));
-                    }
-                }
+    // Target Language Section
+    let mut lang_trg = BytesStart::new("langSec");
+    lang_trg.push_attribute(("xml:lang", unit.target_lang.as_str()));
+    writer.write_event(Event::Start(lang_trg))?;
+    writer.write_event(Event::Start(BytesStart::new("termSec")))?;
+    writer.write_event(Event::Start(BytesStart::new("term")))?;
+    
+    // Check for inline formatting requirement
+    if let Some(sci_name) = unit.metadata.get("x-scientific_name") {
+        if unit.target_lang == "la" || unit.target_text.contains(sci_name) {
+            writer.write_event(Event::Text(BytesText::new(&unit.target_text)))?;
+        } else {
+            writer.write_event(Event::Text(BytesText::new(&unit.target_text)))?;
+        }
+    } else {
+        writer.write_event(Event::Text(BytesText::new(&unit.target_text)))?;
+    }
+    writer.write_event(Event::End(BytesEnd::new("term")))?;
 
-                Event::End(ref e) if e.name().as_ref() == b"prop" || e.name().as_ref() == b"descrip" || e.name().as_ref() == b"termNote" => { inside_prop = false; current_prop_type.clear(); }
-                Event::End(ref e) if e.name().as_ref() == b"note" || e.name().as_ref() == b"notes" => { inside_note = false; }
-                Event::End(ref e) if e.name().as_ref() == b"seg" || e.name().as_ref() == b"term" || e.name().as_ref() == b"source" || e.name().as_ref() == b"target" => { inside_seg = false; }
+    // Append localized notes/term-specific descriptors directly to the target term definition boundary
+    for (key, val) in &unit.metadata {
+        if key == "mp3_url" || key == "pdf_anchor" || key.starts_with("x-") {
+            let mut note = BytesStart::new("termNote");
+            note.push_attribute(("type", key.as_str()));
+            writer.write_event(Event::Start(note))?;
+            writer.write_event(Event::Text(BytesText::new(val)))?;
+            writer.write_event(Event::End(BytesEnd::new("termNote")))?;
+        }
+    }
+    writer.write_event(Event::End(BytesEnd::new("termSec")))?;
+    writer.write_event(Event::End(BytesEnd::new("langSec")))?;
 
-                // Process the entity on element closure closures
-                Event::End(ref e) if e.name().as_ref() == b"tu" || e.name().as_ref() == b"termEntry" || e.name().as_ref() == b"trans-unit" || e.name().as_ref() == b"unit" => {
-                    Python::with_gil(|py| {
-                        let py_dict = PyDict::new(py);
-                        py_dict.set_item("entry_id", &current_id).unwrap();
+    writer.write_event(Event::End(BytesEnd::new("conceptEntry")))?;
+    Ok(())
+}
 
-                        let py_meta = PyDict::new(py);
-                        let mut resolved_scientific_name = current_props.get("scientific_name").cloned().unwrap_or_default();
+/// Generates XLIFF 1.2 compliant <trans-unit> blocks.
+pub fn stream_to_xliff12<W: Write>(writer: &mut Writer<W>, unit: &ComprehensiveTranslationUnit) -> Result<(), quick_xml::Error> {
+    let mut tu = BytesStart::new("trans-unit");
+    tu.push_attribute(("id", unit.id.as_str()));
+    writer.write_event(Event::Start(tu))?;
 
-                        // Loop text variants to scan for hidden binomial patterns
-                        for (lang, text) in &current_segments {
-                            if resolved_scientific_name.is_empty() {
-                                if let Some(found_sci) = detect_scientific_name(text, &binomial_rx) {
-                                    resolved_scientific_name = found_sci;
-                                }
-                            }
-                            // Strip HTML formatting markers if processing plain text segments downstream
-                            let flat_text = text.replace("<i>", "").replace("</i>", "");
-                            py_meta.set_item(format!("text_{}", lang), flat_text).unwrap();
-                        }
+    writer.write_event(Event::Start(BytesStart::new("source")))?;
+    writer.write_event(Event::Text(BytesText::new(&unit.source_text)))?;
+    writer.write_event(Event::End(BytesEnd::new("source")))?;
 
-                        // Map standard attributes and execute rule conversions
-                        for (key, val) in &current_props {
-                            if let Some(caps) = ipa_rx.captures(key) {
-                                py_meta.set_item(format!("ipa_{}", &caps["lang"]), val).unwrap();
-                            } else if key.starts_with("x-mp3-") || key == "mp3_url" {
-                                py_meta.set_item("resolved_audio_url", format!("{}/{}", audio_prefix, val)).unwrap();
-                            } else if key.contains("url") {
-                                py_meta.set_item("resolved_attribution_url", format!("{}/{}", url_prefix, val)).unwrap();
-                            } else {
-                                py_meta.set_item(key, val).unwrap();
-                            }
-                        }
+    writer.write_event(Event::Start(BytesStart::new("target")))?;
+    writer.write_event(Event::Text(BytesText::new(&unit.target_text)))?;
+    writer.write_event(Event::End(BytesEnd::new("target")))?;
 
-                        py_meta.set_item("scientific_name", resolved_scientific_name).unwrap();
-                        if !notes_collection.is_empty() {
-                            py_meta.set_item("notes", notes_collection.clone()).unwrap();
-                        }
+    // Write extended properties and historical citations using standard XLIFF 1.2 extensions
+    write_meta_props(writer, &unit.metadata)?;
+    write_notes(writer, &unit.notes)?;
 
-                        py_dict.set_item("processed_metadata", py_meta).unwrap();
-                        
-                        let py_segs = PyDict::new(py);
-                        for (l, t) in &current_segments {
-                            py_segs.set_item(l, t).unwrap();
-                        }
-                        py_dict.set_item("bilingual_segments", py_segs).unwrap();
+    writer.write_event(Event::End(BytesEnd::new("trans-unit")))?;
+    Ok(())
+}
 
-                        extracted_units.push(py_dict.to_object(py));
-                    });
+/// Generates XLIFF 2.x compliant <unit> components leveraging formal <metadata> extensions.
+pub fn stream_to_xliff20<W: Write>(writer: &mut Writer<W>, unit: &ComprehensiveTranslationUnit) -> Result<(), quick_xml::Error> {
+    let mut u = BytesStart::new("unit");
+    u.push_attribute(("id", unit.id.as_str()));
+    writer.write_event(Event::Start(u))?;
+
+    // Handle Notes natively within the XLIFF 2.0 notes module configuration
+    if !unit.notes.is_empty() {
+        writer.write_event(Event::Start(BytesStart::new("notes")))?;
+        for note_text in &unit.notes {
+            writer.write_event(Event::Start(BytesStart::new("note")))?;
+            writer.write_event(Event::Text(BytesText::new(note_text)))?;
+            writer.write_event(Event::End(BytesEnd::new("note")))?;
+        }
+        writer.write_event(Event::End(BytesEnd::new("notes")))?;
+    }
+
+    writer.write_event(Event::Start(BytesStart::new("segment")))?;
+    writer.write_event(Event::Start(BytesStart::new("source")))?;
+    writer.write_event(Event::Text(BytesText::new(&unit.source_text)))?;
+    writer.write_event(Event::End(BytesEnd::new("source")))?;
+
+    writer.write_event(Event::Start(BytesStart::new("target")))?;
+    writer.write_event(Event::Text(BytesText::new(&unit.target_text)))?;
+    writer.write_event(Event::End(BytesEnd::new("target")))?;
+    writer.write_event(Event::End(BytesEnd::new("segment")))?;
+
+    // Serialize metadata structures inside formal extensibility module tags
+    if !unit.metadata.is_empty() {
+        writer.write_event(Event::Start(BytesStart::new("metadata")))?;
+        for (key, val) in &unit.metadata {
+            let mut meta = BytesStart::new("meta");
+            meta.push_attribute(("type", key.as_str()));
+            writer.write_event(Event::Start(meta))?;
