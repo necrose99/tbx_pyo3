@@ -1,0 +1,13 @@
+<!-- Extended Provenance DTD definition fragment for XLIFF 1.2 -->
+<!ELEMENT trans-unit (source, target?, prop*, note*)>
+<!ATTLIST trans-unit id CDATA #REQUIRED>
+
+<!ELEMENT source (#PCDATA)>
+<!ELEMENT target (#PCDATA)>
+
+<!ELEMENT prop (#PCDATA)>
+<!ATTLIST prop type (
+    provenance | isbn | doi | library_of_congress | dewey | pdf_anchor | mp3_url | x-scientific_name
+) #REQUIRED>
+
+<!ELEMENT note (#PCDATA)>
